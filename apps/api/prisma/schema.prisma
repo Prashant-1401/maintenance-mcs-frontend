@@ -1,0 +1,640 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Foundation ----------
+
+enum PermissionTier {
+  ADMIN
+  MANAGEMENT
+  TECHNICIAN
+  REQUESTER
+}
+
+enum MaintenanceType {
+  MECHANICAL
+  ELECTRICAL
+  OTHER
+}
+
+model Role {
+  id              String           @id @default(cuid())
+  name            String           @unique
+  tier            PermissionTier
+  rank            Int              @default(100)
+  maintenanceType MaintenanceType?
+  /// Max concurrent active work orders before a technician of this role is considered fully utilized.
+  capacity        Int              @default(5)
+  /// Admin-settable labor rate used to compute manpower cost from WorkOrderParticipant.hoursSpent.
+  hourlyRate      Float?
+  createdAt       DateTime         @default(now())
+
+  users User[]
+
+  @@map("roles")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  roleId       String
+  role         Role     @relation(fields: [roleId], references: [id])
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  reportedWorkOrders WorkOrder[]         @relation("WorkOrderCreatedBy")
+  assignedWorkOrders WorkOrder[]         @relation("WorkOrderAssignedTo")
+  statusChanges      WorkOrderStatusHistory[]
+  breakdownsReported BreakdownDetail[]   @relation("BreakdownReportedBy")
+  breakdownsAttended BreakdownDetail[]   @relation("BreakdownAttendedBy")
+  checklistResponses WorkOrderChecklistResponse[]
+  predictiveReadings WorkOrderPredictiveReading[]
+  rcaRecords         RcaRecord[]
+  ownedActionItems   RcaActionItem[]     @relation("ActionItemOwner")
+  verifiedActionItems RcaActionItem[]    @relation("ActionItemVerifiedBy")
+  workOrderParticipations WorkOrderParticipant[] @relation("WorkOrderParticipants")
+  raisedPendingJobs  PendingJobSheetItem[] @relation("PendingJobRaisedBy")
+  assignedPendingJobs PendingJobSheetItem[] @relation("PendingJobAssignedTo")
+  raisedDeviationNotes   DeviationNote[]    @relation("DeviationRaisedBy")
+  approvedDeviationNotes DeviationNote[]    @relation("DeviationApprovedBy")
+  uploadedKnowledgeBankDocuments KnowledgeBankDocument[]
+
+  @@map("users")
+}
+
+model Location {
+  id       String     @id @default(cuid())
+  name     String
+  parentId String?
+  parent   Location?  @relation("LocationHierarchy", fields: [parentId], references: [id])
+  children Location[] @relation("LocationHierarchy")
+
+  assets Asset[]
+
+  createdAt DateTime @default(now())
+
+  @@map("locations")
+}
+
+enum AssetCriticality {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AssetStatus {
+  OPERATIONAL
+  DOWN
+  UNDER_MAINTENANCE
+  RETIRED
+}
+
+model Asset {
+  id          String            @id @default(cuid())
+  tag         String            @unique
+  name        String
+  category    String?
+  criticality AssetCriticality  @default(MEDIUM)
+  status      AssetStatus       @default(OPERATIONAL)
+  locationId  String
+  location    Location          @relation(fields: [locationId], references: [id])
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  workOrders          WorkOrder[]
+  pmSchedules         PMSchedule[]
+  predictiveSchedules PredictiveSchedule[]
+  pendingJobSheetItems PendingJobSheetItem[]
+  knowledgeBankDocuments KnowledgeBankDocument[]
+  operationalBaselines   MachineOperationalBaseline[]
+  troubleshootingPlaybooks TroubleshootingPlaybook[]
+
+  @@map("assets")
+}
+
+// ---------- Work Orders (shared by Breakdown + PM) ----------
+
+enum WorkOrderType {
+  BREAKDOWN
+  PM
+  PREDICTIVE
+}
+
+enum WorkOrderStatus {
+  OPEN
+  ATTENDED
+  CLOSED
+  CANCELLED
+}
+
+model WorkOrder {
+  id        String          @id @default(cuid())
+  type      WorkOrderType
+  status    WorkOrderStatus @default(OPEN)
+  assetId   String
+  asset     Asset           @relation(fields: [assetId], references: [id])
+
+  createdById  String
+  createdBy    User    @relation("WorkOrderCreatedBy", fields: [createdById], references: [id])
+  assignedToId String?
+  assignedTo   User?   @relation("WorkOrderAssignedTo", fields: [assignedToId], references: [id])
+
+  downtimeStart DateTime?
+  downtimeEnd   DateTime?
+
+  dueDate     DateTime? // PM/PREDICTIVE only: persisted due date, used by the calendar views
+  completedAt DateTime? // set generically whenever status -> CLOSED, any type
+  plannedNotes String? // free-text "who's doing it / what's planned" captured at Start — not cost-bearing
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  breakdownDetail      BreakdownDetail?
+  pmSchedule           PMSchedule?               @relation(fields: [pmScheduleId], references: [id])
+  pmScheduleId         String?
+  predictiveSchedule   PredictiveSchedule?       @relation(fields: [predictiveScheduleId], references: [id])
+  predictiveScheduleId String?
+  statusHistory        WorkOrderStatusHistory[]
+  checklistResponses   WorkOrderChecklistResponse[]
+  rcaRecords           RcaRecord[]
+  spareParts           WorkOrderSparePart[]
+  participants         WorkOrderParticipant[]
+  pendingJobSheetItems PendingJobSheetItem[]
+  predictiveReadings   WorkOrderPredictiveReading[]
+  deviationNotes       DeviationNote[]
+
+  @@map("work_orders")
+  @@index([assetId, type])
+}
+
+model SparePart {
+  id        String   @id @default(cuid())
+  itemCode  String   @unique
+  name      String
+  unit      String?
+  unitCost  Float?
+  createdAt DateTime @default(now())
+
+  usages WorkOrderSparePart[]
+
+  @@map("spare_parts")
+}
+
+model WorkOrderSparePart {
+  id          String     @id @default(cuid())
+  workOrderId String
+  workOrder   WorkOrder  @relation(fields: [workOrderId], references: [id])
+  sparePartId String?
+  sparePart   SparePart? @relation(fields: [sparePartId], references: [id])
+  description String
+  quantity    Float
+  unit        String?
+  /// Snapshotted at capture time (from the master, or entered directly for ad-hoc items) — later master price edits don't rewrite history.
+  unitCost    Float?
+  createdAt   DateTime   @default(now())
+
+  @@map("work_order_spare_parts")
+}
+
+model WorkOrderParticipant {
+  id          String    @id @default(cuid())
+  workOrderId String
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+  userId      String
+  user        User      @relation("WorkOrderParticipants", fields: [userId], references: [id])
+  /// Captured at completion; manpower cost = hoursSpent x the participant's Role.hourlyRate at query time.
+  hoursSpent  Float?
+  createdAt   DateTime  @default(now())
+
+  @@unique([workOrderId, userId])
+  @@map("work_order_participants")
+}
+
+enum PendingJobSheetStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+}
+
+model PendingJobSheetItem {
+  id            String                @id @default(cuid())
+  workOrderId   String?
+  workOrder     WorkOrder?            @relation(fields: [workOrderId], references: [id])
+  assetId       String
+  asset         Asset                 @relation(fields: [assetId], references: [id])
+  description   String
+  raisedById    String
+  raisedBy      User                  @relation("PendingJobRaisedBy", fields: [raisedById], references: [id])
+  assignedToId  String?
+  assignedTo    User?                 @relation("PendingJobAssignedTo", fields: [assignedToId], references: [id])
+  dueDate       DateTime?
+  status        PendingJobSheetStatus @default(OPEN)
+  completedAt   DateTime?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@map("pending_job_sheet_items")
+}
+
+model WorkOrderStatusHistory {
+  id          String          @id @default(cuid())
+  workOrderId String
+  workOrder   WorkOrder       @relation(fields: [workOrderId], references: [id])
+  fromStatus  WorkOrderStatus?
+  toStatus    WorkOrderStatus
+  changedById String
+  changedBy   User            @relation(fields: [changedById], references: [id])
+  notes       String?
+  changedAt   DateTime        @default(now())
+
+  @@map("work_order_status_history")
+}
+
+enum DeviationNoteStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// A request to push out a PM/Predictive work order's due date, requiring Admin/Management approval
+/// before the due date actually changes — raised via the schedule's "Delay it" action.
+model DeviationNote {
+  id              String              @id @default(cuid())
+  workOrderId     String
+  workOrder       WorkOrder           @relation(fields: [workOrderId], references: [id])
+  raisedById      String
+  raisedBy        User                @relation("DeviationRaisedBy", fields: [raisedById], references: [id])
+  reason          String
+  originalDueDate DateTime
+  proposedDate    DateTime
+  status          DeviationNoteStatus @default(PENDING)
+  approvedById    String?
+  approvedBy      User?               @relation("DeviationApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  createdAt       DateTime            @default(now())
+
+  @@map("deviation_notes")
+}
+
+// ---------- Breakdown slip ----------
+
+enum FailureCategory {
+  MECHANICAL
+  ELECTRICAL
+  UTILITY
+  INSTRUMENTATION
+  OTHER
+}
+
+model BreakdownDetail {
+  id          String    @id @default(cuid())
+  workOrderId String    @unique
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  occurredAt DateTime
+  reportedAt DateTime  @default(now())
+  attendedAt DateTime?
+  restoredAt DateTime?
+
+  failureCategory FailureCategory @default(OTHER)
+  symptom         String
+  actionTaken     String?
+
+  reportedById String
+  reportedBy   User   @relation("BreakdownReportedBy", fields: [reportedById], references: [id])
+  attendedById String?
+  attendedBy   User?  @relation("BreakdownAttendedBy", fields: [attendedById], references: [id])
+
+  @@map("breakdown_details")
+}
+
+// ---------- Preventive Maintenance ----------
+
+enum PMTriggerType {
+  TIME
+  USAGE
+  METER
+}
+
+model PMSchedule {
+  id          String        @id @default(cuid())
+  assetId     String
+  asset       Asset         @relation(fields: [assetId], references: [id])
+  name        String
+  triggerType PMTriggerType
+  triggerConfig Json
+  leadTimeDays  Int         @default(0)
+  active        Boolean     @default(true)
+
+  checklistTemplateId String?
+  checklistTemplate   PMChecklistTemplate? @relation(fields: [checklistTemplateId], references: [id])
+
+  lastGeneratedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  generatedWorkOrders WorkOrder[]
+
+  @@map("pm_schedules")
+}
+
+model PMChecklistTemplate {
+  id              String          @id @default(cuid())
+  name            String
+  assetCategory   String?
+  maintenanceType MaintenanceType @default(OTHER)
+  version         Int             @default(1)
+  createdAt       DateTime        @default(now())
+
+  items       PMChecklistItem[]
+  pmSchedules PMSchedule[]
+
+  @@map("pm_checklist_templates")
+}
+
+enum ChecklistInputType {
+  CHECKBOX
+  NUMERIC
+  TEXT
+  PASS_FAIL
+}
+
+enum ChecklistItemTrade {
+  OPERATOR
+  ELECTRICAL
+  MECHANICAL
+}
+
+model PMChecklistItem {
+  id          String               @id @default(cuid())
+  templateId  String
+  template    PMChecklistTemplate  @relation(fields: [templateId], references: [id])
+  orderIndex  Int
+  instruction String
+  mandatory   Boolean              @default(true)
+  inputType   ChecklistInputType   @default(CHECKBOX)
+
+  /// e.g. "EXTRUDER", "Feeder" — display grouping, matches the source PM plan's equipment sections.
+  equipmentGroup String
+  /// Free text, e.g. "5 months/ 1000 hrs", "15 day", "Daily" — irregular enough that modeling a real interval isn't worth it.
+  frequency      String?
+  trade          ChecklistItemTrade?
+  /// Expected outcome text, distinct from the instruction itself, e.g. "No loose connections".
+  criteria       String?
+  /// "To be carried out prior to PM?" flag from the source sheet — a daily/routine check rather than the periodic PM task itself.
+  priorToPm      Boolean             @default(false)
+  manpowerRequirement  Int?
+  timeRequirementHours Float?
+
+  responses WorkOrderChecklistResponse[]
+
+  @@map("pm_checklist_items")
+}
+
+model WorkOrderChecklistResponse {
+  id              String          @id @default(cuid())
+  workOrderId     String
+  workOrder       WorkOrder       @relation(fields: [workOrderId], references: [id])
+  checklistItemId String
+  checklistItem   PMChecklistItem @relation(fields: [checklistItemId], references: [id])
+
+  value       String?
+  passed      Boolean?
+  remarks     String?
+  completedById String?
+  completedBy   User?   @relation(fields: [completedById], references: [id])
+  completedAt   DateTime?
+
+  @@map("work_order_checklist_responses")
+  @@unique([workOrderId, checklistItemId])
+}
+
+// ---------- Predictive checklist (mirrors PM checklist template structure) ----------
+
+enum ReadingStatus {
+  NORMAL
+  WARNING
+  CRITICAL
+}
+
+enum ThresholdDirection {
+  ABOVE
+  BELOW
+}
+
+enum CriteriaType {
+  NUMERIC
+  QUALITATIVE
+}
+
+model PredictiveChecklistTemplate {
+  id              String          @id @default(cuid())
+  name            String
+  assetCategory   String?
+  maintenanceType MaintenanceType @default(OTHER)
+  version         Int             @default(1)
+  createdAt       DateTime        @default(now())
+
+  checkPoints         PredictiveCheckPoint[]
+  predictiveSchedules PredictiveSchedule[]
+
+  @@map("predictive_checklist_templates")
+}
+
+model PredictiveCheckPoint {
+  id         String                      @id @default(cuid())
+  templateId String
+  template   PredictiveChecklistTemplate @relation(fields: [templateId], references: [id])
+  orderIndex Int
+  /// e.g. "HLVC", "Feeder Motor", "Extruder Main Motor" — display grouping, matches the source data sheet's equipment sections.
+  equipmentGroup String
+  checkPointName String
+  mandatory      Boolean      @default(true)
+  criteriaType   CriteriaType
+
+  // NUMERIC checkpoints only
+  unit              String?
+  warningThreshold  Float?
+  criticalThreshold Float?
+  direction         ThresholdDirection?
+
+  // QUALITATIVE checkpoints only — shown to the technician as context, e.g. "No Abnormal Noise", "Standard".
+  expectedValue String?
+
+  readings WorkOrderPredictiveReading[]
+
+  @@map("predictive_check_points")
+}
+
+model WorkOrderPredictiveReading {
+  id          String               @id @default(cuid())
+  workOrderId String
+  workOrder   WorkOrder            @relation(fields: [workOrderId], references: [id])
+  checkPointId String
+  checkPoint  PredictiveCheckPoint @relation(fields: [checkPointId], references: [id])
+
+  numericValue Float? // NUMERIC checkpoints
+  passed       Boolean? // QUALITATIVE checkpoints — OK (true) / Not OK (false)
+  observedText String? // optional free-text note of what was actually observed
+  status       ReadingStatus @default(NORMAL)
+  remarks      String?
+
+  recordedById String?
+  recordedBy   User?     @relation(fields: [recordedById], references: [id])
+  recordedAt   DateTime?
+
+  @@map("work_order_predictive_readings")
+  @@unique([workOrderId, checkPointId])
+}
+
+// ---------- Predictive maintenance scheduling (mirrors PMSchedule) ----------
+
+model PredictiveSchedule {
+  id              String        @id @default(cuid())
+  assetId         String
+  asset           Asset         @relation(fields: [assetId], references: [id])
+  name            String
+  triggerType     PMTriggerType
+  triggerConfig   Json
+  leadTimeDays    Int           @default(0)
+  active          Boolean       @default(true)
+
+  checklistTemplateId String?
+  checklistTemplate   PredictiveChecklistTemplate? @relation(fields: [checklistTemplateId], references: [id])
+
+  lastGeneratedAt DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  generatedWorkOrders WorkOrder[]
+
+  @@map("predictive_schedules")
+}
+
+// ---------- RCA capturing sheet + tracker ----------
+
+enum RcaMethod {
+  FIVE_WHY
+  FISHBONE
+}
+
+enum RcaRecordStatus {
+  DRAFT
+  FINAL
+}
+
+model RcaRecord {
+  id          String    @id @default(cuid())
+  workOrderId String
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  method          RcaMethod
+  whySteps        Json?
+  fishboneCauses  Json?
+  rootCause       String?
+  remarks         String?
+  status          RcaRecordStatus @default(DRAFT)
+
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  actionItems RcaActionItem[]
+
+  @@map("rca_records")
+}
+
+enum RcaActionType {
+  CORRECTIVE
+  PREVENTIVE
+}
+
+enum RcaActionStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  VERIFIED
+}
+
+model RcaActionItem {
+  id          String        @id @default(cuid())
+  rcaRecordId String
+  rcaRecord   RcaRecord     @relation(fields: [rcaRecordId], references: [id])
+
+  description String
+  type        RcaActionType
+  ownerId     String
+  owner       User          @relation("ActionItemOwner", fields: [ownerId], references: [id])
+  dueDate     DateTime
+  status      RcaActionStatus @default(OPEN)
+
+  completedAt  DateTime?
+  verifiedById String?
+  verifiedBy   User?     @relation("ActionItemVerifiedBy", fields: [verifiedById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@map("rca_action_items")
+}
+
+model KnowledgeBankDocument {
+  id           String   @id @default(cuid())
+  title        String
+  category     String?  // 'SOP', 'OEM_MANUAL', 'ELECTRICAL_DIAGRAM', 'LUBRICATION_CHART', 'SAFETY'
+  fileName     String
+  filePath     String
+  mimeType     String
+  sizeBytes    Int
+  assetId      String?
+  asset        Asset?   @relation(fields: [assetId], references: [id])
+  tags         String?  // comma-separated tags e.g. "motor,vibration,bearing"
+  machineModel String?
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@map("knowledge_bank_documents")
+}
+
+model MachineOperationalBaseline {
+  id            String   @id @default(cuid())
+  assetId       String
+  asset         Asset    @relation(fields: [assetId], references: [id])
+  parameterName String   // e.g. "Bearing Temperature", "Hydraulic Line Pressure", "Main Motor RPM"
+  nominalValue  Float    // Standard expected running value
+  minThreshold  Float?   // Lower warning bound
+  maxThreshold  Float?   // Upper warning bound
+  unit          String   // "°C", "bar", "rpm", "A", "Hz"
+  operatingMode String?  // "Continuous Run", "High Load", "Idle"
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("machine_operational_baselines")
+}
+
+model TroubleshootingPlaybook {
+  id                   String   @id @default(cuid())
+  assetId              String?
+  asset                Asset?   @relation(fields: [assetId], references: [id])
+  assetCategory        String?  // "Pump", "Motor", "Extruder", "General"
+  symptom              String   // Symptom or alarm code
+  probableCause        String   // Root cause or mechanical failure mode
+  standardFix          String   // Standard Operating Procedure / Fix steps
+  recommendedSpares    String?  // Recommended spare part item codes
+  safetyPrecautions    String?  // LOTO, PPE required
+  estimatedDowntimeMin Int?     // Estimated repair duration in mins
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@map("troubleshooting_playbooks")
+}
+

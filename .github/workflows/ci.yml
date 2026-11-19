@@ -1,0 +1,39 @@
+name: CI Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Lint, Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci || npm install
+
+      - name: Generate Prisma Client
+        run: npm run prisma:generate
+
+      - name: Build Backend API (NestJS)
+        run: npm run build:api
+
+      - name: Build Frontend Web (Vite + React)
+        run: npm run build:web
+
+      - name: Run Backend Unit Tests
+        run: npm --workspace=apps/api test -- --passWithNoTests
+        env:
+          JWT_SECRET: ci-testing-jwt-secret-key-2026
