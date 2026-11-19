@@ -53,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginAsDemo = (tier: PermissionTier = 'ADMIN') => {
     const demoUser = DEMO_USERS[tier] || DEMO_USERS.ADMIN;
     const demoToken = `demo-token-${Date.now()}`;
+    localStorage.setItem('is_demo_mode', 'true');
     localStorage.setItem('token', demoToken);
     localStorage.setItem('user', JSON.stringify(demoUser));
     setUser(demoUser);
@@ -84,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    localStorage.removeItem('is_demo_mode');
     setUser(null);
   };
 

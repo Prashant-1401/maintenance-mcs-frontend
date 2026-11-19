@@ -18,9 +18,9 @@ export function LoginPage() {
     setLoading(true);
     try {
       await login(email, password);
-      navigate('/');
+      navigate('/', { replace: true });
     } catch {
-      setError('Invalid email or password');
+      setError('Invalid email or password. You can also use Instant Demo Access.');
     } finally {
       setLoading(false);
     }
@@ -28,7 +28,7 @@ export function LoginPage() {
 
   const handleInstantDemo = (tier: PermissionTier = 'ADMIN') => {
     loginAsDemo(tier);
-    navigate('/');
+    navigate('/', { replace: true });
   };
 
   return (
